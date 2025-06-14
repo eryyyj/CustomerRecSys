@@ -1,11 +1,14 @@
+# IMPORT STANDARD LIBRARIES FIRST
 import os
 os.environ['TORCH_FORCE_WEIGHTS_ONLY'] = '0'  # Fix for PyTorch 2.6 security change
 import time
-import cv2
 import numpy as np
 import requests
 from PIL import Image
 from ultralytics import YOLO
+import imageio  # Alternative to OpenCV for video processing
+import io
+import json
 
 # IMPORT STREAMLIT AFTER STANDARD LIBRARIES
 import streamlit as st
@@ -18,75 +21,63 @@ st.set_page_config(
 )
 
 # CONFIGURATION
-HF_API_TOKEN = st.secrets["secrets"]["HF_API_TOKEN"].strip()
+# Enhanced token handling with debug information
+try:
+    HF_API_TOKEN = st.secrets["secrets"]["HF_API_TOKEN"].strip()
+    TOKEN_VALID = True
+except KeyError:
+    HF_API_TOKEN = os.getenv("HF_API_TOKEN", "").strip()
+    TOKEN_VALID = bool(HF_API_TOKEN)
+
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 
-# SAFE MODEL LOADING FUNCTION
+# LOAD YOLO MODEL - CACHED TO LOAD ONLY ONCE
 @st.cache_resource
 def load_yolo_model():
     try:
-        # Load pre-trained YOLOv8 model with safety workaround
-        model = YOLO('yolov8n.pt',task='detect')  # Official COCO model
-        
+        # Load pre-trained YOLOv8 model
+        model = YOLO('yolov8n.pt')  # Automatically downloads if not available
         return model
     except Exception as e:
         st.error(f"⚠️ Error loading YOLO model: {str(e)}")
-        try:
-            # Fallback to direct loading
-            from ultralytics.yolo.engine.model import YOLO as SafeYOLO
-            return SafeYOLO('yolov8n.pt')
-        except:
-            st.error("Failed to load YOLO model with fallback method")
         return None
 
 # LOAD MODEL AT STARTUP
 detection_model = load_yolo_model()
 
-# OBJECT DETECTION FUNCTION
+# OBJECT DETECTION FUNCTION (NO OPENCV)
 def detect_and_count(image_np):
     """
     Detect and count persons in an image
-    Returns: (person_count: int, annotated_image: np.array)
+    Returns: person_count: int
     """
     if detection_model is None:
-        return 0, image_np
+        return 0
     
-    try:
-        # Run inference with safety parameters
-        results = detection_model.predict(
-            image_np, 
-            conf=0.5, 
-            classes=[0],  # Class 0 = person
-            imgsz=640,   # Standard input size
-            device='cpu'  # Force CPU if GPU issues occur
-        )
-        
-        # Initialize count
-        person_count = 0
-        annotated_frame = image_np.copy()
-        
-        # Process results
-        for result in results:
-            # Draw bounding boxes and labels
-            annotated_frame = result.plot()
-            
-            # Count persons
-            for box in result.boxes:
-                class_id = int(box.cls)
-                if class_id == 0:  # Person class
-                    person_count += 1
-        
-        return person_count, annotated_frame
+    # Run inference
+    results = detection_model.predict(image_np, conf=0.5, classes=[0])  # Class 0 = person
     
-    except Exception as e:
-        st.error(f"Detection error: {str(e)}")
-        return 0, image_np
+    # Initialize count
+    person_count = 0
+    
+    # Process results
+    for result in results:
+        # Count persons
+        for box in result.boxes:
+            class_id = int(box.cls)
+            if class_id == 0:  # Person class
+                person_count += 1
+    
+    return person_count
 
-# GENERATE BUSINESS RECOMMENDATIONS (SAME AS BEFORE)
+# GENERATE BUSINESS RECOMMENDATIONS
 def generate_business_recommendations(person_count, is_video=False, avg_count=0):
     """
     Generate business recommendations based on customer count
     """
+    if not TOKEN_VALID:
+        return "⚠️ Error: Hugging Face API token not configured."
+    
     if person_count == 0 and avg_count == 0:
         return "No customers detected. Consider promotional activities to attract more visitors."
     
@@ -116,9 +107,6 @@ def generate_business_recommendations(person_count, is_video=False, avg_count=0)
         Offer practical, immediate actions the store manager can implement.
         """
     
-    if not HF_API_TOKEN:
-        return "⚠️ Error: Hugging Face API token not configured."
-    
     headers = {"Authorization": f"Bearer {HF_API_TOKEN}"}
     payload = {
         "inputs": prompt,
@@ -138,10 +126,16 @@ def generate_business_recommendations(person_count, is_video=False, avg_count=0)
             timeout=120
         )
         
+        if response.status_code == 401:
+            return "⚠️ API Error (401): Invalid Hugging Face API token. Please check your credentials."
+        
         if response.status_code != 200:
             return f"⚠️ API Error ({response.status_code}): {response.text[:200]}..."
-            
-        result = response.json()
+        
+        try:
+            result = response.json()
+        except json.JSONDecodeError:
+            return f"⚠️ Invalid API response: {response.text[:200]}"
         
         if isinstance(result, list) and len(result) > 0:
             if 'generated_text' in result[0]:
@@ -158,6 +152,18 @@ st.subheader("Retail Customer Detection & Business Optimization")
 st.markdown("""
     *Detect and count customers in your store, then get AI-powered recommendations to improve your business*
 """)
+
+# TOKEN DEBUG INFO
+with st.sidebar.expander("🔑 API Token Status"):
+    if TOKEN_VALID:
+        st.success("Hugging Face token is configured")
+        st.caption(f"Token starts with: {HF_API_TOKEN[:10]}...")
+        st.caption(f"Token length: {len(HF_API_TOKEN)} characters")
+        if not HF_API_TOKEN.startswith("hf_"):
+            st.warning("Token doesn't start with 'hf_' - this might be invalid")
+    else:
+        st.error("Hugging Face token is NOT configured")
+        st.info("Add your token in Streamlit secrets as HF_API_TOKEN")
 
 # FILE UPLOAD SECTION
 with st.expander("📤 Upload Media", expanded=True):
@@ -180,21 +186,17 @@ if uploaded_file:
                 st.stop()
                 
             with st.spinner("Detecting customers..."):
-                # Convert to OpenCV format
+                # Convert to numpy array
                 img_np = np.array(image)
-                img_np = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
                 
                 # Run detection
-                person_count, annotated_img = detect_and_count(img_np)
-                
-                # Convert back to RGB for display
-                annotated_img_rgb = cv2.cvtColor(annotated_img, cv2.COLOR_BGR2RGB)
+                person_count = detect_and_count(img_np)
                 
                 # Display results
                 st.subheader("🔍 Detection Results")
                 col1, col2 = st.columns([1, 1])
                 with col1:
-                    st.image(annotated_img_rgb, caption="Customer Detection", use_column_width=True)
+                    st.image(image, caption="Original Image", use_column_width=True)
                 with col2:
                     st.metric("Customers Detected", person_count, 
                               help="Number of people detected in the image")
@@ -217,7 +219,7 @@ if uploaded_file:
                     recommendations = generate_business_recommendations(person_count)
                     st.markdown(recommendations)
     
-    # VIDEO PROCESSING
+    # VIDEO PROCESSING WITH IMAGEIO (NO OPENCV)
     elif uploaded_file.type.startswith("video"):
         if detection_model is None:
             st.error("Detection model not loaded. Unable to process video.")
@@ -225,13 +227,13 @@ if uploaded_file:
             
         st.info("Video processing started. This may take 1-2 minutes...")
         
-        # Save video to temp file
-        temp_video = f"temp_{uploaded_file.name}"
-        with open(temp_video, "wb") as f:
-            f.write(uploaded_file.getbuffer())
+        # Read video with imageio
+        video_bytes = uploaded_file.read()
+        video_reader = imageio.get_reader(io.BytesIO(video_bytes), 'ffmpeg')
+        fps = video_reader.get_meta_data()['fps']
+        total_frames = video_reader.count_frames()
         
         # Initialize analysis
-        total_frames = 0
         processed_frames = 0
         total_customers = 0
         max_customers = 0
@@ -243,54 +245,44 @@ if uploaded_file:
         progress_bar = st.progress(0)
         video_placeholder = st.empty()
         
-        # Process video
-        cap = cv2.VideoCapture(temp_video)
-        frame_skip = 10  # Process every 10th frame to reduce computation
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        total_video_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
+        try:
+            # Process video
+            for i, frame in enumerate(video_reader):
+                if i % 10 != 0:  # Process every 10th frame
+                    continue
+                    
+                processed_frames += 1
                 
-            total_frames += 1
-            
-            # Process only every nth frame
-            if total_frames % frame_skip != 0:
-                continue
+                # Update progress
+                progress = min(int((i / total_frames) * 100), 100)
+                progress_bar.progress(progress)
+                status_text.text(f"Processing frame {i}/{total_frames}...")
                 
-            processed_frames += 1
-            
-            # Update progress
-            progress = min(int((cap.get(cv2.CAP_PROP_POS_FRAMES) / total_video_frames * 100)), 100)
-            progress_bar.progress(progress)
-            status_text.text(f"Processing frame {total_frames}/{total_video_frames}...")
-            
-            # Detect and count persons
-            person_count, annotated_frame = detect_and_count(frame)
-            total_customers += person_count
-            customer_counts.append(person_count)
-            
-            # Track min/max
-            if person_count > max_customers:
-                max_customers = person_count
-            if person_count < min_customers:
-                min_customers = person_count
+                # Convert to numpy array
+                frame_np = np.array(frame)
                 
-            # Display preview every 50 processed frames
-            if processed_frames % 50 == 0:
-                preview_frame = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
-                video_placeholder.image(preview_frame, caption="Processing Preview", width=600)
-        
-        # Release resources
-        cap.release()
-        os.remove(temp_video)
+                # Detect and count persons
+                person_count = detect_and_count(frame_np)
+                total_customers += person_count
+                customer_counts.append(person_count)
+                
+                # Track min/max
+                if person_count > max_customers:
+                    max_customers = person_count
+                if person_count < min_customers:
+                    min_customers = person_count
+                    
+                # Display preview every 50 processed frames
+                if processed_frames % 50 == 0:
+                    video_placeholder.image(frame, caption="Processing Preview", width=600)
+        finally:
+            video_reader.close()
         
         # Calculate metrics
         if processed_frames > 0:
             avg_customers = total_customers / processed_frames
-            peak_time = (customer_counts.index(max_customers) * frame_skip) / fps
+            peak_frame_index = customer_counts.index(max_customers) if customer_counts else 0
+            peak_time = (peak_frame_index * 10) / fps
         else:
             avg_customers = 0
             peak_time = 0
@@ -303,13 +295,14 @@ if uploaded_file:
         col1.metric("Average Customers", f"{avg_customers:.1f}", 
                    help="Average number of customers per frame")
         col2.metric("Peak Crowd", max_customers, 
-                   delta=f"at {peak_time:.1f} seconds",
+                   delta=f"at {peak_time:.1f} seconds" if processed_frames > 0 else "",
                    help="Maximum number of customers detected")
         col3.metric("Quiet Period", min_customers, 
                    help="Minimum number of customers detected")
         
         # Show traffic chart
-        st.line_chart(customer_counts, use_container_width=True, height=300)
+        if customer_counts:
+            st.line_chart(customer_counts, use_container_width=True, height=300)
         
         # Generate recommendations
         st.divider()
@@ -355,4 +348,4 @@ st.caption("""
     *Note: Customer detection accuracy depends on video quality and camera angles. 
     Recommendations are AI-generated and should be validated with business metrics.*
 """)
-st.caption(f"App version: 1.0 | Last updated: {time.strftime('%Y-%m-%d')}")
+st.caption(f"App version: 2.1 | Last updated: {time.strftime('%Y-%m-%d')}")
