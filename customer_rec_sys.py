@@ -27,7 +27,7 @@ MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 def load_yolo_model():
     try:
         # Load pre-trained YOLOv8 model with safety workaround
-        model = YOLO('yolov8n.pt')  # Official COCO model
+        model = YOLO('yolov8n.pt',task='detect')  # Official COCO model
         
         return model
     except Exception as e:
