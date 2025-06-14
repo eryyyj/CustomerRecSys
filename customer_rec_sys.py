@@ -1,10 +1,13 @@
 import os
+os.environ['TORCH_FORCE_WEIGHTS_ONLY'] = '0'  # Fix for PyTorch 2.6 security change
 import time
 import cv2
 import numpy as np
 import requests
 from PIL import Image
 from ultralytics import YOLO
+
+# IMPORT STREAMLIT AFTER STANDARD LIBRARIES
 import streamlit as st
 
 # SET PAGE CONFIG - MUST BE FIRST STREAMLIT COMMAND
