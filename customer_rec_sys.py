@@ -414,7 +414,7 @@ if prompt := st.sidebar.chat_input("Ask about retail analytics..."):
         if len(st.session_state.chat_history) > 2:
             context = "\n".join([
                 f"{msg['role'].capitalize()}: {msg['content']}" 
-                for msg in st.session_state.chat_history[-3:-1]
+                for msg in st.session_state.chat_history[-3:-1]]
             )
         
         # Generate response
