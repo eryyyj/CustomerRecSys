@@ -380,9 +380,23 @@ if uploaded_file:
             recommendations = generate_business_recommendations(0, True, avg_customers)
             st.markdown(recommendations)
 
-# RETAIL CHATBOT SECTION
-st.sidebar.title("💬 Retail AI Assistant")
-st.sidebar.markdown("Ask questions about retail analytics, store optimization, or customer behavior")
+# BUSINESS TIPS SECTION
+st.divider()
+st.subheader("💡 Retail Optimization Tips")
+
+tips = """
+1. **Staff Allocation**: Align staff schedules with peak customer hours
+2. **Queue Management**: Implement efficient checkout systems during busy periods
+3. **Product Placement**: Position high-margin items in high-traffic areas
+4. **Promotional Timing**: Run promotions during low-traffic hours to boost visits
+5. **Store Layout**: Optimize aisle design to improve flow and increase browsing
+"""
+st.markdown(tips)
+
+# RETAIL CHATBOT SECTION - MOVED TO BOTTOM
+st.divider()
+st.subheader("💬 Retail AI Assistant")
+st.markdown("Ask questions about retail analytics, store optimization, or customer behavior")
 
 # Initialize chat history
 if "chat_history" not in st.session_state:
@@ -392,20 +406,20 @@ if "chat_history" not in st.session_state:
 
 # Display chat messages
 for message in st.session_state.chat_history:
-    with st.sidebar.chat_message(message["role"]):
+    with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
 # Handle user input
-if prompt := st.sidebar.chat_input("Ask about retail analytics..."):
+if prompt := st.chat_input("Ask about retail analytics..."):
     # Add user message to chat history
     st.session_state.chat_history.append({"role": "user", "content": prompt})
     
     # Display user message in chat message container
-    with st.sidebar.chat_message("user"):
+    with st.chat_message("user"):
         st.markdown(prompt)
     
     # Display assistant response in chat message container
-    with st.sidebar.chat_message("assistant"):
+    with st.chat_message("assistant"):
         message_placeholder = st.empty()
         full_response = ""
         
@@ -432,23 +446,11 @@ if prompt := st.sidebar.chat_input("Ask about retail analytics..."):
     st.session_state.chat_history.append({"role": "assistant", "content": full_response})
 
 # Chatbot reset button
-if st.sidebar.button("🧹 Clear Chat History"):
+if st.button("🧹 Clear Chat History", key="clear_chat"):
     st.session_state.chat_history = [
         {"role": "assistant", "content": "Chat history cleared. How can I help you with retail analytics today?"}
     ]
-
-# BUSINESS TIPS SECTION
-st.divider()
-st.subheader("💡 Retail Optimization Tips")
-
-tips = """
-1. **Staff Allocation**: Align staff schedules with peak customer hours
-2. **Queue Management**: Implement efficient checkout systems during busy periods
-3. **Product Placement**: Position high-margin items in high-traffic areas
-4. **Promotional Timing**: Run promotions during low-traffic hours to boost visits
-5. **Store Layout**: Optimize aisle design to improve flow and increase browsing
-"""
-st.markdown(tips)
+    st.experimental_rerun()
 
 # SIDEBAR RESOURCES
 st.sidebar.divider()
