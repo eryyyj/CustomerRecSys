@@ -19,7 +19,7 @@ st.set_page_config(
 )
 
 # CONFIGURATION
-HF_API_TOKEN = st.secrets.get("HF_API_TOKEN", os.getenv("HF_API_TOKEN", "")).strip()
+HF_API_TOKEN = st.secrets["secrets"]["HF_API_TOKEN"].strip()
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 
 # SAFE MODEL LOADING FUNCTION
