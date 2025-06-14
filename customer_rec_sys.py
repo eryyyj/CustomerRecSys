@@ -145,6 +145,62 @@ def generate_business_recommendations(person_count, is_video=False, avg_count=0)
     except Exception as e:
         return f"⚠️ API Error: {str(e)}"
 
+# RETAIL CHATBOT FUNCTION
+def retail_chatbot(question, context=""):
+    """
+    Generate response to retail-related questions
+    """
+    if not TOKEN_VALID:
+        return "⚠️ Error: Hugging Face API token not configured."
+    
+    # Create prompt with context
+    prompt = f"""
+    You are an expert retail business consultant. Provide a helpful, professional response to the question below.
+    Focus on practical, data-driven advice for retail store optimization.
+    
+    Context: {context}
+    
+    Question: {question}
+    
+    Answer:
+    """
+    
+    headers = {"Authorization": f"Bearer {HF_API_TOKEN}"}
+    payload = {
+        "inputs": prompt,
+        "parameters": {
+            "max_new_tokens": 600,
+            "temperature": 0.6,
+            "top_p": 0.85,
+            "repetition_penalty": 1.1
+        }
+    }
+    
+    try:
+        response = requests.post(
+            f"https://api-inference.huggingface.co/models/{MODEL_NAME}",
+            headers=headers,
+            json=payload,
+            timeout=90
+        )
+        
+        if response.status_code != 200:
+            return f"⚠️ API Error ({response.status_code}): {response.text[:200]}"
+        
+        try:
+            result = response.json()
+        except json.JSONDecodeError:
+            return f"⚠️ Invalid API response: {response.text[:200]}"
+        
+        if isinstance(result, list) and len(result) > 0:
+            if 'generated_text' in result[0]:
+                return result[0]['generated_text'].strip()
+        
+        return f"⚠️ Unexpected response format: {str(result)[:300]}"
+    
+    except Exception as e:
+        return f"⚠️ API Error: {str(e)}"
+
 # APP TITLE AND DESCRIPTION
 st.title("👥 Customer Analytics Inspector")
 st.subheader("Retail Customer Detection & Business Optimization")
@@ -324,6 +380,63 @@ if uploaded_file:
             recommendations = generate_business_recommendations(0, True, avg_customers)
             st.markdown(recommendations)
 
+# RETAIL CHATBOT SECTION
+st.sidebar.title("💬 Retail AI Assistant")
+st.sidebar.markdown("Ask questions about retail analytics, store optimization, or customer behavior")
+
+# Initialize chat history
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = [
+        {"role": "assistant", "content": "Hello! I'm your retail analytics assistant. How can I help you with your store optimization today?"}
+    ]
+
+# Display chat messages
+for message in st.session_state.chat_history:
+    with st.sidebar.chat_message(message["role"]):
+        st.markdown(message["content"])
+
+# Handle user input
+if prompt := st.sidebar.chat_input("Ask about retail analytics..."):
+    # Add user message to chat history
+    st.session_state.chat_history.append({"role": "user", "content": prompt})
+    
+    # Display user message in chat message container
+    with st.sidebar.chat_message("user"):
+        st.markdown(prompt)
+    
+    # Display assistant response in chat message container
+    with st.sidebar.chat_message("assistant"):
+        message_placeholder = st.empty()
+        full_response = ""
+        
+        # Generate response with context of last 2 messages
+        context = ""
+        if len(st.session_state.chat_history) > 2:
+            context = "\n".join([
+                f"{msg['role'].capitalize()}: {msg['content']}" 
+                for msg in st.session_state.chat_history[-3:-1]
+            )
+        
+        # Generate response
+        with st.spinner("Thinking..."):
+            assistant_response = retail_chatbot(prompt, context)
+        
+        # Simulate stream of response
+        for chunk in assistant_response.split():
+            full_response += chunk + " "
+            time.sleep(0.05)
+            message_placeholder.markdown(full_response + "▌")
+        message_placeholder.markdown(full_response)
+    
+    # Add assistant response to chat history
+    st.session_state.chat_history.append({"role": "assistant", "content": full_response})
+
+# Chatbot reset button
+if st.sidebar.button("🧹 Clear Chat History"):
+    st.session_state.chat_history = [
+        {"role": "assistant", "content": "Chat history cleared. How can I help you with retail analytics today?"}
+    ]
+
 # BUSINESS TIPS SECTION
 st.divider()
 st.subheader("💡 Retail Optimization Tips")
@@ -338,6 +451,7 @@ tips = """
 st.markdown(tips)
 
 # SIDEBAR RESOURCES
+st.sidebar.divider()
 st.sidebar.title("📚 Retail Analytics Resources")
 st.sidebar.markdown("""
 - [Customer Behavior Analysis Guide](https://hbr.org/topic/customer-analytics)
@@ -360,4 +474,4 @@ st.caption("""
     *Note: Customer detection accuracy depends on video quality and camera angles. 
     Recommendations are AI-generated and should be validated with business metrics.*
 """)
-st.caption(f"App version: 2.1 | Last updated: {time.strftime('%Y-%m-%d')}")
+st.caption(f"App version: 3.0 | Last updated: {time.strftime('%Y-%m-%d')}")
