@@ -88,7 +88,73 @@ def detect_and_count(image_np):
 
 # GENERATE BUSINESS RECOMMENDATIONS (SAME AS BEFORE)
 def generate_business_recommendations(person_count, is_video=False, avg_count=0):
-    # ... (same as previous implementation) ...
+    """
+    Generate business recommendations based on customer count
+    """
+    if person_count == 0 and avg_count == 0:
+        return "No customers detected. Consider promotional activities to attract more visitors."
+    
+    # Create prompt based on detection type
+    if is_video:
+        prompt = f"""
+        As a retail business consultant, analyze store traffic with an average of {avg_count:.1f} customers. 
+        Provide 5 actionable recommendations to:
+        1. Optimize staffing levels
+        2. Improve customer experience
+        3. Increase conversion rates
+        4. Enhance store layout
+        5. Boost sales opportunities
+        
+        Focus on practical, cost-effective solutions suitable for a retail environment.
+        """
+    else:
+        prompt = f"""
+        As a retail business consultant, analyze a store snapshot showing {person_count} customers. 
+        Provide 5 specific recommendations to:
+        1. Improve customer engagement
+        2. Optimize product placement
+        3. Enhance staff-customer interactions
+        4. Increase sales conversion
+        5. Manage crowd flow
+        
+        Offer practical, immediate actions the store manager can implement.
+        """
+    
+    if not HF_API_TOKEN:
+        return "⚠️ Error: Hugging Face API token not configured."
+    
+    headers = {"Authorization": f"Bearer {HF_API_TOKEN}"}
+    payload = {
+        "inputs": prompt,
+        "parameters": {
+            "max_new_tokens": 800,
+            "temperature": 0.5,
+            "top_p": 0.9,
+            "repetition_penalty": 1.1
+        }
+    }
+    
+    try:
+        response = requests.post(
+            f"https://api-inference.huggingface.co/models/{MODEL_NAME}",
+            headers=headers,
+            json=payload,
+            timeout=120
+        )
+        
+        if response.status_code != 200:
+            return f"⚠️ API Error ({response.status_code}): {response.text[:200]}..."
+            
+        result = response.json()
+        
+        if isinstance(result, list) and len(result) > 0:
+            if 'generated_text' in result[0]:
+                return result[0]['generated_text'].strip()
+        
+        return f"⚠️ Unexpected response format: {str(result)[:300]}"
+    
+    except Exception as e:
+        return f"⚠️ API Error: {str(e)}"
 
 # APP TITLE AND DESCRIPTION
 st.title("👥 Customer Analytics Inspector")
