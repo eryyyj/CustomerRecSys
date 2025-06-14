@@ -1,4 +1,3 @@
-# IMPORT STANDARD LIBRARIES FIRST
 import os
 os.environ['TORCH_FORCE_WEIGHTS_ONLY'] = '0'  # Fix for PyTorch 2.6 security change
 import time
@@ -178,6 +177,11 @@ if uploaded_file:
     # IMAGE PROCESSING
     if uploaded_file.type.startswith("image"):
         image = Image.open(uploaded_file)
+        
+        # Convert to RGB if grayscale (1 channel) or RGBA (4 channels)
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+            
         st.image(image, caption="Uploaded Store Image", use_column_width=True)
         
         if st.button("🔍 Analyze Customer Traffic", type="primary"):
@@ -260,6 +264,14 @@ if uploaded_file:
                 
                 # Convert to numpy array
                 frame_np = np.array(frame)
+                
+                # Handle different channel formats
+                if len(frame_np.shape) == 2:  # Grayscale image (height, width)
+                    frame_np = np.stack([frame_np]*3, axis=-1)  # Convert to RGB
+                elif frame_np.shape[2] == 1:  # Single channel image
+                    frame_np = np.repeat(frame_np, 3, axis=2)  # Convert to 3 channels
+                elif frame_np.shape[2] == 4:  # RGBA image
+                    frame_np = frame_np[..., :3]  # Remove alpha channel
                 
                 # Detect and count persons
                 person_count = detect_and_count(frame_np)
