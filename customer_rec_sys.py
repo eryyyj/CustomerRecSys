@@ -1,251 +1,340 @@
-import streamlit as st
+# IMPORT ALL STANDARD LIBRARIES FIRST
+import os
+import time
+import cv2
 import numpy as np
+import requests
 from PIL import Image
 from ultralytics import YOLO
-import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
-import os
-import tempfile
 
-# Set your Hugging Face API token
-HF_API_TOKEN = st.secrets["secrets"]["HF_API_TOKEN"].strip()
-MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
+# IMPORT STREAMLIT AFTER STANDARD LIBRARIES
+import streamlit as st
 
-# Try to import OpenCV with fallback
-try:
-    import cv2
-    CV2_AVAILABLE = True
-except ImportError as e:
-    st.warning(f"OpenCV import warning: {e}")
-    CV2_AVAILABLE = False
-except OSError as e:
-    st.warning(f"OpenCV library missing: {e}")
-    CV2_AVAILABLE = False
-
-# Initialize models
-@st.cache_resource
-def load_yolo():
-    return YOLO('yolov8n.pt')
-
-@st.cache_resource
-def load_llm():
-    tokenizer = AutoTokenizer.from_pretrained(
-        "HuggingFaceH4/zephyr-7b-beta",
-        token=HF_API_TOKEN
-    )
-    model = AutoModelForCausalLM.from_pretrained(
-        "HuggingFaceH4/zephyr-7b-beta",
-        torch_dtype=torch.bfloat16,
-        device_map="auto",
-        token=HF_API_TOKEN
-    )
-    return pipeline(
-        "text-generation",
-        model=model,
-        tokenizer=tokenizer,
-        torch_dtype=torch.bfloat16,
-        device_map="auto"
-    )
-
-def generate_recommendation(customer_count):
-    prompt = f"""
-    As a retail business consultant, provide 3-5 actionable recommendations to improve a store 
-    that typically has {customer_count} customers present at any given time. Focus on:
-    - Staffing optimization
-    - Store layout improvements
-    - Promotional strategies
-    - Customer experience enhancements
-    - Inventory management
-    - Queue management
-    Format your response with clear headings for each recommendation category.
-    """
-    
-    generator = load_llm()
-    response = generator(
-        prompt,
-        max_new_tokens=500,
-        do_sample=True,
-        temperature=0.7,
-        top_k=50,
-        top_p=0.95,
-        pad_token_id=generator.tokenizer.eos_token_id
-    )
-    
-    return response[0]['generated_text'].split(prompt)[-1].strip()
-
-# Streamlit UI
-st.set_page_config(layout="wide", page_title="Retail Customer Analytics", page_icon="🛒")
-st.title("🛒 Retail Customer Analytics")
-st.subheader("Detect customers and get AI-powered business recommendations")
-
-with st.expander("How to use this tool"):
-    st.markdown("""
-    1. **Upload** an image or video from your store
-    2. Our AI will **detect and count** customers
-    3. Get **actionable recommendations** to improve your business
-    - Supported formats: JPG, PNG
-    - For videos: Requires OpenCV with GUI libraries
-    """)
-    
-    if not CV2_AVAILABLE:
-        st.warning("""
-        **Video processing disabled**: OpenCV dependencies missing. To enable video processing:
-        - Install missing libraries: `apt-get install libgl1-mesa-glx`
-        - Or use headless environment: `pip install opencv-python-headless`
-        """)
-
-uploaded_file = st.file_uploader(
-    "Upload store image or video", 
-    type=["jpg", "jpeg", "png"] + (["mp4", "mov"] if CV2_AVAILABLE else []),
-    help="Supported formats: JPG, PNG" + (" + MP4, MOV" if CV2_AVAILABLE else "")
+# SET PAGE CONFIG - MUST BE FIRST STREAMLIT COMMAND
+st.set_page_config(
+    page_title="Customer Analytics Inspector",
+    page_icon="👥",
+    layout="wide"
 )
 
-def process_image(image):
-    """Process an image and return customer count and annotated image"""
-    model = load_yolo()
-    results = model.predict(image, classes=[0], conf=0.5)  # Class 0 = person
-    customer_count = len(results[0].boxes)
-    annotated_image = results[0].plot()[:, :, ::-1]  # Convert to RGB
-    return customer_count, annotated_image
+# CONFIGURATION
+HF_API_TOKEN = st.secrets.get("HF_API_TOKEN", os.getenv("HF_API_TOKEN", "")).strip()
+MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 
-if uploaded_file is not None:
-    if uploaded_file.type.startswith('image'):
-        # Process image
-        image = Image.open(uploaded_file)
-        col1, col2 = st.columns(2)
-        col1.image(image, caption="Original Image", use_column_width=True)
+# LOAD YOLO MODEL - CACHED TO LOAD ONLY ONCE
+@st.cache_resource
+def load_yolo_model():
+    try:
+        # Load pre-trained YOLOv8 model (official COCO dataset model)
+        model = YOLO('yolov8n.pt')  # Automatically downloads if not available
+        return model
+    except Exception as e:
+        st.error(f"⚠️ Error loading YOLO model: {str(e)}")
+        return None
+
+# LOAD MODEL AT STARTUP
+detection_model = load_yolo_model()
+
+# OBJECT DETECTION FUNCTION
+def detect_and_count(image_np):
+    """
+    Detect and count persons in an image
+    Returns: (person_count: int, annotated_image: np.array)
+    """
+    if detection_model is None:
+        return 0, image_np
+    
+    # Run inference
+    results = detection_model.predict(image_np, conf=0.5, classes=[0])  # Class 0 = person
+    
+    # Initialize count
+    person_count = 0
+    annotated_frame = image_np.copy()
+    
+    # Process results
+    for result in results:
+        # Draw bounding boxes and labels
+        annotated_frame = result.plot()
         
-        with st.spinner("Detecting customers..."):
-            try:
-                customer_count, annotated_image = process_image(image)
-                col2.image(annotated_image, caption=f"Detected Customers: {customer_count}", use_column_width=True)
-                st.metric("Total Customers Detected", customer_count)
+        # Count persons
+        for box in result.boxes:
+            class_id = int(box.cls)
+            if class_id == 0:  # Person class
+                person_count += 1
+    
+    return person_count, annotated_frame
+
+# GENERATE BUSINESS RECOMMENDATIONS
+def generate_business_recommendations(person_count, is_video=False, avg_count=0):
+    """
+    Generate business recommendations based on customer count
+    """
+    if person_count == 0 and avg_count == 0:
+        return "No customers detected. Consider promotional activities to attract more visitors."
+    
+    # Create prompt based on detection type
+    if is_video:
+        prompt = f"""
+        As a retail business consultant, analyze store traffic with an average of {avg_count:.1f} customers. 
+        Provide 5 actionable recommendations to:
+        1. Optimize staffing levels
+        2. Improve customer experience
+        3. Increase conversion rates
+        4. Enhance store layout
+        5. Boost sales opportunities
+        
+        Focus on practical, cost-effective solutions suitable for a retail environment.
+        """
+    else:
+        prompt = f"""
+        As a retail business consultant, analyze a store snapshot showing {person_count} customers. 
+        Provide 5 specific recommendations to:
+        1. Improve customer engagement
+        2. Optimize product placement
+        3. Enhance staff-customer interactions
+        4. Increase sales conversion
+        5. Manage crowd flow
+        
+        Offer practical, immediate actions the store manager can implement.
+        """
+    
+    if not HF_API_TOKEN:
+        return "⚠️ Error: Hugging Face API token not configured."
+    
+    headers = {"Authorization": f"Bearer {HF_API_TOKEN}"}
+    payload = {
+        "inputs": prompt,
+        "parameters": {
+            "max_new_tokens": 800,
+            "temperature": 0.5,
+            "top_p": 0.9,
+            "repetition_penalty": 1.1
+        }
+    }
+    
+    try:
+        response = requests.post(
+            f"https://api-inference.huggingface.co/models/{MODEL_NAME}",
+            headers=headers,
+            json=payload,
+            timeout=120
+        )
+        
+        if response.status_code != 200:
+            return f"⚠️ API Error ({response.status_code}): {response.text[:200]}..."
+            
+        result = response.json()
+        
+        if isinstance(result, list) and len(result) > 0:
+            if 'generated_text' in result[0]:
+                return result[0]['generated_text'].strip()
+        
+        return f"⚠️ Unexpected response format: {str(result)[:300]}"
+    
+    except Exception as e:
+        return f"⚠️ API Error: {str(e)}"
+
+# APP TITLE AND DESCRIPTION
+st.title("👥 Customer Analytics Inspector")
+st.subheader("Retail Customer Detection & Business Optimization")
+st.markdown("""
+    *Detect and count customers in your store, then get AI-powered recommendations to improve your business*
+""")
+
+# FILE UPLOAD SECTION
+with st.expander("📤 Upload Media", expanded=True):
+    uploaded_file = st.file_uploader(
+        "Upload store image or video",
+        type=["jpg", "jpeg", "png", "mp4"],
+        help="Supported formats: Images (JPG, PNG), Videos (MP4)"
+    )
+
+# PROCESSING SECTION
+if uploaded_file:
+    # IMAGE PROCESSING
+    if uploaded_file.type.startswith("image"):
+        image = Image.open(uploaded_file)
+        st.image(image, caption="Uploaded Store Image", use_column_width=True)
+        
+        if st.button("🔍 Analyze Customer Traffic", type="primary"):
+            if detection_model is None:
+                st.error("Detection model not loaded. Unable to process.")
+                st.stop()
+                
+            with st.spinner("Detecting customers..."):
+                # Convert to OpenCV format
+                img_np = np.array(image)
+                img_np = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+                
+                # Run detection
+                person_count, annotated_img = detect_and_count(img_np)
+                
+                # Convert back to RGB for display
+                annotated_img_rgb = cv2.cvtColor(annotated_img, cv2.COLOR_BGR2RGB)
+                
+                # Display results
+                st.subheader("🔍 Detection Results")
+                col1, col2 = st.columns([1, 1])
+                with col1:
+                    st.image(annotated_img_rgb, caption="Customer Detection", use_column_width=True)
+                with col2:
+                    st.metric("Customers Detected", person_count, 
+                              help="Number of people detected in the image")
+                    
+                    st.info(f"**Business Insight**:")
+                    if person_count == 0:
+                        st.warning("No customers detected - consider promotional activities")
+                    elif person_count < 3:
+                        st.success("Low traffic - opportunity for personalized service")
+                    elif person_count < 10:
+                        st.success("Moderate traffic - focus on conversion optimization")
+                    else:
+                        st.warning("High traffic - ensure staff availability and checkout efficiency")
                 
                 # Generate recommendations
-                with st.spinner("Generating business recommendations..."):
-                    try:
-                        recommendations = generate_recommendation(customer_count)
-                        st.subheader("📈 Business Improvement Recommendations")
-                        st.markdown(f"```\n{recommendations}\n```")
-                        
-                        # Download button for results
-                        result_text = f"Customer Count: {customer_count}\n\nRecommendations:\n{recommendations}"
-                        st.download_button(
-                            label="Download Results",
-                            data=result_text,
-                            file_name="business_recommendations.txt",
-                            mime="text/plain"
-                        )
-                    except Exception as e:
-                        st.error(f"Error generating recommendations: {str(e)}")
-                        st.info("This might be due to high demand on the AI model. Please try again later.")
-            except Exception as e:
-                st.error(f"Error processing image: {str(e)}")
-
-    elif uploaded_file.type.startswith('video') and CV2_AVAILABLE:
-        # Process video
-        st.info("Video processing may take several minutes. For faster results, use clips under 1 minute.")
+                st.divider()
+                st.subheader("📈 Business Optimization Recommendations")
+                
+                with st.spinner("Generating AI-powered recommendations..."):
+                    recommendations = generate_business_recommendations(person_count)
+                    st.markdown(recommendations)
+    
+    # VIDEO PROCESSING
+    elif uploaded_file.type.startswith("video"):
+        if detection_model is None:
+            st.error("Detection model not loaded. Unable to process video.")
+            st.stop()
+            
+        st.info("Video processing started. This may take 1-2 minutes...")
         
         # Save video to temp file
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmpfile:
-            tmpfile.write(uploaded_file.read())
-            video_path = tmpfile.name
+        temp_video = f"temp_{uploaded_file.name}"
+        with open(temp_video, "wb") as f:
+            f.write(uploaded_file.getbuffer())
         
-        st.video(video_path)
-        
-        model = load_yolo()
-        cap = cv2.VideoCapture(video_path)
-        
+        # Initialize analysis
+        total_frames = 0
+        processed_frames = 0
+        total_customers = 0
+        max_customers = 0
+        min_customers = 1000
         customer_counts = []
-        frame_placeholder = st.empty()
-        progress_bar = st.progress(0)
-        status_text = st.empty()
         
-        # Process video frames
-        frame_count = 0
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        sampling_rate = max(1, total_frames // 100)  # Process max 100 frames
+        # Create placeholders for UI
+        status_text = st.empty()
+        progress_bar = st.progress(0)
+        video_placeholder = st.empty()
+        
+        # Process video
+        cap = cv2.VideoCapture(temp_video)
+        frame_skip = 10  # Process every 10th frame to reduce computation
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        total_video_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
                 break
                 
-            frame_count += 1
-            # Skip frames based on sampling rate
-            if frame_count % sampling_rate != 0:
+            total_frames += 1
+            
+            # Process only every nth frame
+            if total_frames % frame_skip != 0:
                 continue
                 
-            # Process frame
-            results = model.predict(frame, classes=[0], conf=0.5, verbose=False)
-            customer_count = len(results[0].boxes)
-            customer_counts.append(customer_count)
-            
-            # Display processed frame
-            annotated_frame = results[0].plot()[:, :, ::-1]
-            frame_placeholder.image(annotated_frame, caption=f"Frame {frame_count}/{total_frames}")
+            processed_frames += 1
             
             # Update progress
-            progress = min(frame_count / total_frames, 1.0)
+            progress = min(int((cap.get(cv2.CAP_PROP_POS_FRAMES) / total_video_frames * 100)), 100)
             progress_bar.progress(progress)
-            status_text.text(f"Processing: {frame_count}/{total_frames} frames | Current customers: {customer_count}")
+            status_text.text(f"Processing frame {total_frames}/{total_video_frames}...")
+            
+            # Detect and count persons
+            person_count, annotated_frame = detect_and_count(frame)
+            total_customers += person_count
+            customer_counts.append(person_count)
+            
+            # Track min/max
+            if person_count > max_customers:
+                max_customers = person_count
+            if person_count < min_customers:
+                min_customers = person_count
+                
+            # Display preview every 50 processed frames
+            if processed_frames % 50 == 0:
+                preview_frame = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
+                video_placeholder.image(preview_frame, caption="Processing Preview", width=600)
         
+        # Release resources
         cap.release()
-        os.unlink(video_path)  # Delete temp file
-        frame_placeholder.empty()
-        progress_bar.empty()
-        status_text.empty()
+        os.remove(temp_video)
         
-        # Calculate statistics
-        if customer_counts:
-            avg_customers = int(np.mean(customer_counts))
-            max_customers = max(customer_counts)
-            
-            st.subheader("📊 Video Analysis Results")
-            col1, col2 = st.columns(2)
-            col1.metric("Average Customers", avg_customers)
-            col2.metric("Peak Customers", max_customers)
-            
-            st.line_chart(customer_counts, use_container_width=True)
-            
-            # Generate recommendations
-            with st.spinner("Generating business recommendations..."):
-                try:
-                    recommendations = generate_recommendation(avg_customers)
-                    st.subheader("📈 Business Improvement Recommendations")
-                    st.markdown(f"```\n{recommendations}\n```")
-                    
-                    # Download button for results
-                    result_text = f"Average Customers: {avg_customers}\nPeak Customers: {max_customers}\n\nRecommendations:\n{recommendations}"
-                    st.download_button(
-                        label="Download Results",
-                        data=result_text,
-                        file_name="video_analysis_recommendations.txt",
-                        mime="text/plain"
-                    )
-                except Exception as e:
-                    st.error(f"Error generating recommendations: {str(e)}")
-                    st.info("This might be due to high demand on the AI model. Please try again later.")
+        # Calculate metrics
+        if processed_frames > 0:
+            avg_customers = total_customers / processed_frames
+            peak_time = (customer_counts.index(max_customers) * frame_skip) / fps
         else:
-            st.warning("No customers detected in the video")
-            
-    elif uploaded_file.type.startswith('video') and not CV2_AVAILABLE:
-        st.error("Video processing unavailable. OpenCV dependencies missing.")
-        st.info("To enable video processing:")
-        st.code("""
-# For Ubuntu/Debian:
-sudo apt-get update
-sudo apt-get install libgl1-mesa-glx
+            avg_customers = 0
+            peak_time = 0
+        
+        # Display results
+        st.success("✅ Video analysis complete!")
+        st.subheader("📊 Customer Traffic Analysis")
+        
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Average Customers", f"{avg_customers:.1f}", 
+                   help="Average number of customers per frame")
+        col2.metric("Peak Crowd", max_customers, 
+                   delta=f"at {peak_time:.1f} seconds",
+                   help="Maximum number of customers detected")
+        col3.metric("Quiet Period", min_customers, 
+                   help="Minimum number of customers detected")
+        
+        # Show traffic chart
+        st.line_chart(customer_counts, use_container_width=True, height=300)
+        
+        # Generate recommendations
+        st.divider()
+        st.subheader("📈 Business Optimization Recommendations")
+        
+        with st.spinner("Generating AI-powered recommendations..."):
+            recommendations = generate_business_recommendations(0, True, avg_customers)
+            st.markdown(recommendations)
 
-# Then reinstall OpenCV:
-pip install opencv-python-headless --force-reinstall
+# BUSINESS TIPS SECTION
+st.divider()
+st.subheader("💡 Retail Optimization Tips")
+
+tips = """
+1. **Staff Allocation**: Align staff schedules with peak customer hours
+2. **Queue Management**: Implement efficient checkout systems during busy periods
+3. **Product Placement**: Position high-margin items in high-traffic areas
+4. **Promotional Timing**: Run promotions during low-traffic hours to boost visits
+5. **Store Layout**: Optimize aisle design to improve flow and increase browsing
+"""
+st.markdown(tips)
+
+# SIDEBAR RESOURCES
+st.sidebar.title("📚 Retail Analytics Resources")
+st.sidebar.markdown("""
+- [Customer Behavior Analysis Guide](https://hbr.org/topic/customer-analytics)
+- [Retail Staff Optimization](https://www.retailcustomerexperience.com/articles/)
+- [Store Layout Best Practices](https://www.nrf.com/resources)
 """)
 
-else:
-    st.info("Please upload an image file to get started")
-    st.image("https://images.unsplash.com/photo-1563014959-7aaa83350992?auto=format&fit=crop&w=1200&h=600", 
-             caption="Retail Store Analytics Example", use_column_width=True)
+st.sidebar.divider()
+st.sidebar.markdown("""
+**How to Use:**
+1. Upload store image or video
+2. Get customer count analytics
+3. Receive AI-powered recommendations
+4. Implement suggested improvements
+""")
 
-# Add footer
-st.markdown("---")
-st.caption("AI Retail Advisor • Powered by YOLOv8 and Zephyr-7B-Beta")
+# FOOTER
+st.divider()
+st.caption("""
+    *Note: Customer detection accuracy depends on video quality and camera angles. 
+    Recommendations are AI-generated and should be validated with business metrics.*
+""")
+st.caption(f"App version: 1.0 | Last updated: {time.strftime('%Y-%m-%d')}")
